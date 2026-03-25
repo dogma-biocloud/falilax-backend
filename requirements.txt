@@ -1,5 +1,5 @@
 fastapi==0.129.0
-uvicorn==0.41.0
+uvicorn[standard]==0.41.0
 pydantic==2.12.5
 pydantic_core==2.41.5
 starlette==0.52.1
@@ -10,10 +10,18 @@ idna==3.11
 typing_extensions==4.15.0
 typing-inspection==0.4.2
 annotated-types==0.7.0
+
 python-dotenv
-sqlalchemy
+
+sqlalchemy>=2.0
 alembic
+
+# 🔥 FIX FOR POSTGRES (CRITICAL)
+psycopg2-binary
+
+# (optional but safe to keep)
 psycopg[binary]
+
 Jinja2==3.1.6
 MarkupSafe==2.1.5
 python-multipart
