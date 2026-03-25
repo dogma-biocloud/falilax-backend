@@ -27,6 +27,15 @@ def _set_if_model_has(values: dict[str, Any], key: str, value: Any) -> None:
         values[key] = value
 
 
+def _normalized_tier(tier: str) -> str:
+    """
+    Keep tiers consistent in storage.
+    Escalation should happen later in delivery/formatting logic so
+    the dedupe key remains predictable.
+    """
+    return (tier or "NOTICE").upper()
+
+
 def create_or_upsert_alert(
     db: Session,
     *,
@@ -37,7 +46,7 @@ def create_or_upsert_alert(
     parameter_code: str,
     title: str,
     message: str,
-    # NEW: allow status to be passed (default queued)
+    # allow status to be passed (default queued)
     status: str = "queued",
     # delivery
     delivery_channel: str = "in_app",
@@ -50,30 +59,56 @@ def create_or_upsert_alert(
     cluster_code: Optional[str] = None,
     region_code: Optional[str] = None,
     county_code: Optional[str] = None,
+    # location context (optional)
+    location_label: Optional[str] = None,
+    address_line1: Optional[str] = None,
+    address_line2: Optional[str] = None,
+    city: Optional[str] = None,
+    state_region: Optional[str] = None,
+    postal_code: Optional[str] = None,
+    country: Optional[str] = None,
+    latitude: Optional[float] = None,
+    longitude: Optional[float] = None,
+    plus_code: Optional[str] = None,
+    landmark: Optional[str] = None,
+    directions_hint: Optional[str] = None,
     # safety
     confidence: str = "suspected",
     disclaimer: Optional[str] = None,
-    # NEW: measured context (optional)
+    # measured context (optional)
     measured_value: Optional[float] = None,
     unit: Optional[str] = None,
     threshold: Optional[float] = None,
     threshold_kind: Optional[str] = None,  # "max" | "min" | "range" etc
-    # NEW: multi-parameter system risk output (optional)
+    # multi-parameter system risk output (optional)
     risk_result: Optional[RiskResult] = None,
 ) -> None:
     """
-    Insert an alert; if it already exists (dedupe key), update it instead:
+    Insert an alert; if it already exists (dedupe key), update it instead.
+
+    Existing alert branch behavior:
       - occurrence_count += 1
       - last_seen_at = now()
-      - keep status queued (so delivery worker can pick it up)
-    Dedupe key: (user_id, scope_type, scope_id, tier, parameter_code)
+      - status reset to queued so worker can pick it up again
+      - sent_at cleared if column exists
+      - prior delivery error cleared if columns exist
+
+    Dedupe key:
+      (user_id, scope_type, scope_id, tier, parameter_code)
+
+    Note:
+      Tier escalation is intentionally NOT done here, because tier is part of the
+      dedupe key. Escalation is better handled in delivery/formatting logic after load.
     """
+
+    effective_disclaimer = disclaimer or DEFAULT_DISCLAIMER
+    effective_tier = _normalized_tier(tier)
 
     values: dict[str, Any] = {
         "user_id": user_id,
         "scope_type": scope_type,
         "scope_id": scope_id,
-        "tier": tier,
+        "tier": effective_tier,
         "parameter_code": parameter_code,
         "title": title,
         "message": message,
@@ -89,16 +124,31 @@ def create_or_upsert_alert(
         "region_code": region_code,
         "county_code": county_code,
         "confidence": confidence,
-        "disclaimer": disclaimer or DEFAULT_DISCLAIMER,
+        "disclaimer": effective_disclaimer,
     }
 
-    # Optional measured context (only if columns exist)
+    # Optional measured context
     _set_if_model_has(values, "measured_value", measured_value)
     _set_if_model_has(values, "unit", unit)
     _set_if_model_has(values, "threshold", threshold)
     _set_if_model_has(values, "threshold_kind", threshold_kind)
 
-    # Optional risk payload (only if column exists)
+    # Optional location context
+    _set_if_model_has(values, "location_label", location_label)
+    _set_if_model_has(values, "address_line1", address_line1)
+    _set_if_model_has(values, "address_line2", address_line2)
+    _set_if_model_has(values, "city", city)
+    _set_if_model_has(values, "state_region", state_region)
+    _set_if_model_has(values, "postal_code", postal_code)
+    _set_if_model_has(values, "country", country)
+    _set_if_model_has(values, "latitude", latitude)
+    _set_if_model_has(values, "longitude", longitude)
+    _set_if_model_has(values, "plus_code", plus_code)
+    _set_if_model_has(values, "landmark", landmark)
+    _set_if_model_has(values, "directions_hint", directions_hint)
+
+    # Optional risk payload
+    payload: Optional[dict[str, Any]] = None
     if risk_result is not None:
         payload = {
             "risk_level": risk_result.risk_level,
@@ -110,14 +160,14 @@ def create_or_upsert_alert(
 
     stmt = insert(Alert).values(**values)
 
-    # Build conflict update map
+    # Existing alert branch: requeue + refresh alert context
     set_: dict[str, Any] = {
         "occurrence_count": Alert.occurrence_count + 1,
         "last_seen_at": func.now(),
         "title": title,
         "message": message,
-        # IMPORTANT: keep queued so worker picks it up again
-        "status": status,
+        # IMPORTANT: reset to queued so worker picks it up again
+        "status": "queued",
         "delivery_channel": delivery_channel,
         "recipient": recipient,
         "scheduled_for": scheduled_for,
@@ -127,10 +177,27 @@ def create_or_upsert_alert(
         "region_code": region_code,
         "county_code": county_code,
         "confidence": confidence,
-        "disclaimer": disclaimer or DEFAULT_DISCLAIMER,
+        "disclaimer": effective_disclaimer,
     }
 
-    # Optional measured context updates (only if columns exist)
+    # Keep stored tier normalized, but do not escalate here
+    if hasattr(Alert, "tier"):
+        set_["tier"] = effective_tier
+
+    # Optional delivery-state reset fields
+    if hasattr(Alert, "sent_at"):
+        set_["sent_at"] = None
+
+    if hasattr(Alert, "last_error"):
+        set_["last_error"] = None
+
+    if hasattr(Alert, "last_error_at"):
+        set_["last_error_at"] = None
+
+    if hasattr(Alert, "delivery_attempts"):
+        set_["delivery_attempts"] = 0
+
+    # Optional measured context updates
     if hasattr(Alert, "measured_value"):
         set_["measured_value"] = measured_value
     if hasattr(Alert, "unit"):
@@ -140,7 +207,33 @@ def create_or_upsert_alert(
     if hasattr(Alert, "threshold_kind"):
         set_["threshold_kind"] = threshold_kind
 
-    # Optional risk payload updates (only if columns exist)
+    # Optional location context updates
+    if hasattr(Alert, "location_label"):
+        set_["location_label"] = location_label
+    if hasattr(Alert, "address_line1"):
+        set_["address_line1"] = address_line1
+    if hasattr(Alert, "address_line2"):
+        set_["address_line2"] = address_line2
+    if hasattr(Alert, "city"):
+        set_["city"] = city
+    if hasattr(Alert, "state_region"):
+        set_["state_region"] = state_region
+    if hasattr(Alert, "postal_code"):
+        set_["postal_code"] = postal_code
+    if hasattr(Alert, "country"):
+        set_["country"] = country
+    if hasattr(Alert, "latitude"):
+        set_["latitude"] = latitude
+    if hasattr(Alert, "longitude"):
+        set_["longitude"] = longitude
+    if hasattr(Alert, "plus_code"):
+        set_["plus_code"] = plus_code
+    if hasattr(Alert, "landmark"):
+        set_["landmark"] = landmark
+    if hasattr(Alert, "directions_hint"):
+        set_["directions_hint"] = directions_hint
+
+    # Optional risk payload updates
     if risk_result is not None:
         if hasattr(Alert, "risk_payload"):
             set_["risk_payload"] = payload

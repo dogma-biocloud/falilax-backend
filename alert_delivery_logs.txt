@@ -1,0 +1,81 @@
+"""create alert_delivery_logs table
+
+Revision ID: create_alert_delivery_logs
+Revises: e2cfd682a049
+Create Date: 2026-03-18
+
+"""
+from typing import Sequence, Union
+
+from alembic import op
+import sqlalchemy as sa
+
+
+revision: str = "create_alert_delivery_logs"
+down_revision: Union[str, Sequence[str], None] = "e2cfd682a049"
+branch_labels: Union[str, Sequence[str], None] = None
+depends_on: Union[str, Sequence[str], None] = None
+
+
+def upgrade() -> None:
+    op.create_table(
+        "alert_delivery_logs",
+        sa.Column("id", sa.Integer(), nullable=False),
+
+        # 🔹 Core linkage
+        sa.Column("location_id", sa.Integer(), nullable=True),
+
+        # 🔹 What triggered the alert
+        sa.Column("parameter_code", sa.String(length=64), nullable=False),
+        sa.Column("escalation_level", sa.String(length=64), nullable=False),
+
+        # 🔹 Delivery details
+        sa.Column("channel", sa.String(length=32), nullable=False),
+        sa.Column("recipient_target", sa.String(length=255), nullable=False),
+        sa.Column("delivery_status", sa.String(length=32), nullable=False),
+
+        # 🔹 Content
+        sa.Column("subject", sa.String(length=255), nullable=True),
+        sa.Column("body", sa.Text(), nullable=True),
+
+        # 🔹 Error handling
+        sa.Column("error_message", sa.Text(), nullable=True),
+
+        # 🔹 Timing
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.Column(
+            "sent_at",
+            sa.DateTime(timezone=True),
+            nullable=True,
+        ),
+
+        # 🔹 Future-proof attribution tracking (VERY IMPORTANT for FalilaX)
+        sa.Column("scope_type", sa.String(length=64), nullable=True),
+        sa.Column("scope_id", sa.Integer(), nullable=True),
+        sa.Column("strategy", sa.String(length=64), nullable=True),
+
+        sa.ForeignKeyConstraint(["location_id"], ["locations.id"]),
+        sa.PrimaryKeyConstraint("id"),
+    )
+
+    # 🔹 Indexes (performance + analytics)
+    op.create_index(op.f("ix_alert_delivery_logs_id"), "alert_delivery_logs", ["id"])
+    op.create_index(op.f("ix_alert_delivery_logs_parameter_code"), "alert_delivery_logs", ["parameter_code"])
+    op.create_index(op.f("ix_alert_delivery_logs_escalation_level"), "alert_delivery_logs", ["escalation_level"])
+    op.create_index(op.f("ix_alert_delivery_logs_delivery_status"), "alert_delivery_logs", ["delivery_status"])
+    op.create_index(op.f("ix_alert_delivery_logs_sent_at"), "alert_delivery_logs", ["sent_at"])
+
+
+def downgrade() -> None:
+    op.drop_index(op.f("ix_alert_delivery_logs_sent_at"), table_name="alert_delivery_logs")
+    op.drop_index(op.f("ix_alert_delivery_logs_delivery_status"), table_name="alert_delivery_logs")
+    op.drop_index(op.f("ix_alert_delivery_logs_escalation_level"), table_name="alert_delivery_logs")
+    op.drop_index(op.f("ix_alert_delivery_logs_parameter_code"), table_name="alert_delivery_logs")
+    op.drop_index(op.f("ix_alert_delivery_logs_id"), table_name="alert_delivery_logs")
+
+    op.drop_table("alert_delivery_logs")

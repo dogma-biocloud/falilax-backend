@@ -31,7 +31,24 @@ class Measurement(Base):
     qualifier: Mapped[str | None] = mapped_column(String(8), nullable=True)  # "<", ">", "ND"
     method: Mapped[str | None] = mapped_column(String(128), nullable=True)
 
-    # ✅ Real datetime column (NOT string)
+    measured_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+    source_type: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        server_default="manual",
+    )
+
+    quality_flag: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        server_default="valid",
+    )
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),

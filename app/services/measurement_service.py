@@ -6,9 +6,11 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models.measurement import Measurement
+from app.models.parameter_definition import ParameterDefinition
 from app.schemas.measurement import MeasurementCreate
 from app.services.alert_service import create_or_upsert_alert
 from app.services.threshold_rules import evaluate_measurement
+from app.services.unit_conversion_service import convert_value
 from app.services.water_risk_engine import WaterRiskEngine, RiskResult
 
 # Calm tier mapping
@@ -74,7 +76,6 @@ def _collect_latest_parameters_for_sample(
         if val is None:
             continue
 
-        # keep the most recent value per parameter
         if code not in params:
             try:
                 params[code] = float(val)
@@ -104,18 +105,63 @@ def _evaluate_multi_parameter_risk(
 def create_measurement(db: Session, payload: MeasurementCreate):
     """
     1) Save measurement
-    2) Evaluate thresholds (single-parameter)
-    3) Evaluate multi-parameter risk (WaterRiskEngine)
-    4) Create/Upsert alert if necessary
+    2) Check parameter repository
+    3) Normalize / validate expected unit
+    4) Evaluate thresholds (single-parameter)
+    5) Evaluate multi-parameter risk (WaterRiskEngine)
+    6) Create/Upsert alert if necessary
+
+    Policy:
+    - known active parameters keep incoming quality_flag
+    - unknown/inactive parameters are accepted but flagged as 'unmapped'
+    - known parameters with convertible units are normalized
+    - known parameters with wrong non-convertible units are flagged as 'unit_mismatch'
     """
+
+    parameter_def = (
+        db.query(ParameterDefinition)
+        .filter(ParameterDefinition.parameter_code == payload.parameter_code)
+        .filter(ParameterDefinition.is_active == True)
+        .first()
+    )
+
+    final_quality_flag = payload.quality_flag
+    final_value = payload.value
+    final_unit = payload.unit
+
+    if parameter_def is None:
+        final_quality_flag = "unmapped"
+    else:
+        expected_unit = parameter_def.expected_unit
+
+        converted_value, normalized_unit, converted = convert_value(
+            value=payload.value,
+            from_unit=payload.unit,
+            to_unit=expected_unit,
+        )
+
+        if expected_unit:
+            final_unit = expected_unit
+
+        if converted:
+            final_value = converted_value
+        else:
+            incoming_unit = (payload.unit or "").strip().lower()
+            expected_unit_norm = (expected_unit or "").strip().lower()
+
+            if expected_unit_norm and incoming_unit and incoming_unit != expected_unit_norm:
+                final_quality_flag = "unit_mismatch"
 
     m = Measurement(
         sample_id=payload.sample_id,
         parameter_code=payload.parameter_code,
-        value=payload.value,
-        unit=payload.unit,
+        value=final_value,
+        unit=final_unit,
         qualifier=payload.qualifier,
         method=payload.method,
+        measured_at=payload.measured_at,
+        source_type=payload.source_type,
+        quality_flag=final_quality_flag,
     )
 
     db.add(m)
@@ -124,28 +170,28 @@ def create_measurement(db: Session, payload: MeasurementCreate):
 
     # 1) Single-parameter threshold evaluation
     raw_result = evaluate_measurement(
+        db,
         parameter_code=payload.parameter_code,
-        value=payload.value,
+        value=final_value,
     )
     tier = TIER_MAP.get(raw_result, "OK")
 
     # 2) Multi-parameter risk evaluation (based on latest values in this sample)
-    # NOTE: safe even if only 1 parameter exists (engine will usually return None)
     risk_result = _evaluate_multi_parameter_risk(db, sample_id=payload.sample_id)
 
-    # Decide: create alert if either single-parameter says NOTICE/ACTION OR system risk exists
     create_single_param_alert = tier in ("NOTICE", "ACTION")
-    create_system_risk_alert = risk_result is not None and (risk_result.risk_level in ("NOTICE", "ACTION"))
+    create_system_risk_alert = risk_result is not None and (
+        risk_result.risk_level in ("NOTICE", "ACTION")
+    )
 
     if create_single_param_alert or create_system_risk_alert:
-        # If single-param tier is OK but system risk is NOTICE/ACTION, promote tier to system tier
         final_tier = tier
         if final_tier == "OK" and risk_result is not None:
             final_tier = risk_result.risk_level
 
         title, message = _build_alert_text(
             payload.parameter_code,
-            payload.value,
+            final_value,
             final_tier,
         )
 
@@ -159,9 +205,8 @@ def create_measurement(db: Session, payload: MeasurementCreate):
             title=title,
             message=message,
             status="queued",
-            measured_value=payload.value,
-            unit=payload.unit,
-            # NEW: pass system risk result so AlertFormatter can include the block
+            measured_value=final_value,
+            unit=final_unit,
             risk_result=risk_result,
         )
 

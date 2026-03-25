@@ -1,36 +1,49 @@
-DEFAULT_THRESHOLDS = {
-    "turbidity": {
-        "warn_max": 5.0,
-        "critical_max": 10.0,
-    },
-    "ph": {
-        "warn_min": 6.5,
-        "warn_max": 8.5,
-        "critical_min": 6.0,
-        "critical_max": 9.0,
-    },
-    "lead_ppb": {
-        "warn_max": 10.0,
-        "critical_max": 15.0,
-    }
-}
+from sqlalchemy.orm import Session
 
-def evaluate_measurement(parameter_code: str, value: float):
-    rules = DEFAULT_THRESHOLDS.get(parameter_code)
+from app.models.parameter_definition import ParameterDefinition
 
-    if not rules:
+
+def evaluate_measurement(
+    db: Session,
+    parameter_code: str,
+    value: float,
+) -> str:
+    """
+    Evaluate a normalized measurement using threshold values stored
+    in parameter_definitions.
+
+    Expected:
+    - parameter_code is the canonical parameter code
+    - value is already normalized to the canonical unit
+
+    Returns:
+        "normal"
+        "attention"
+        "critical"
+    """
+
+    param = (
+        db.query(ParameterDefinition)
+        .filter(ParameterDefinition.parameter_code == parameter_code)
+        .filter(ParameterDefinition.is_active.is_(True))
+        .first()
+    )
+
+    if not param:
         return "normal"
 
     # Critical first
-    if "critical_min" in rules and value < rules["critical_min"]:
-        return "critical"
-    if "critical_max" in rules and value > rules["critical_max"]:
+    if param.critical_min is not None and value < param.critical_min:
         return "critical"
 
-    # Warning level
-    if "warn_min" in rules and value < rules["warn_min"]:
+    if param.critical_max is not None and value > param.critical_max:
+        return "critical"
+
+    # Warning next
+    if param.warn_min is not None and value < param.warn_min:
         return "attention"
-    if "warn_max" in rules and value > rules["warn_max"]:
+
+    if param.warn_max is not None and value > param.warn_max:
         return "attention"
 
     return "normal"
