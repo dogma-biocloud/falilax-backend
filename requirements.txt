@@ -16,11 +16,14 @@ python-dotenv
 sqlalchemy>=2.0
 alembic
 
-# 🔥 FIX FOR POSTGRES (CRITICAL)
+# 🔥 POSTGRES DRIVER
 psycopg2-binary
-
-# (optional but safe to keep)
 psycopg[binary]
+
+# 🔥 DATA INGESTION (CRITICAL FOR YOUR PIPELINE)
+openpyxl
+pandas
+numpy
 
 Jinja2==3.1.6
 MarkupSafe==2.1.5
