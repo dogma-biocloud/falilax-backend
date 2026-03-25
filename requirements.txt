@@ -25,6 +25,9 @@ openpyxl
 pandas
 numpy
 
+# 🔥 COMMUNICATION (SMS ALERTS)
+twilio
+
 Jinja2==3.1.6
 MarkupSafe==2.1.5
 python-multipart
